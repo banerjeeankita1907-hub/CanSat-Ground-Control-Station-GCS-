@@ -411,11 +411,12 @@ footer{
     </div>
 
     <div class="panel">
-      <div class="panel-head"><div class="panel-title">Mission Control</div><div class="eyebrow">CRITICAL COMMANDS</div></div>
+      <div class="panel-head"><div class="panel-title">Mission Control (Simulation)</div><div class="eyebrow">NO HARDWARE COMMANDS</div></div>
+      <div class="mc-status-line" style="color:var(--warn);">SIMULATION ONLY — these controls never transmit commands to a vehicle.</div>
       <div class="mc-controls">
-        <button class="mc-btn critical" id="btnSeparation">MANUAL SEPARATION <span class="arm-icon">HOLD TO ARM</span></button>
-        <button class="mc-btn critical" id="btnChute">EMERGENCY PARACHUTE DEPLOY <span class="arm-icon">HOLD TO ARM</span></button>
-        <button class="mc-btn critical" id="btnRedundant">REDUNDANT ACTIVATION <span class="arm-icon">HOLD TO ARM</span></button>
+        <button class="mc-btn critical" id="btnSeparation">SIMULATE SEPARATION <span class="arm-icon">HOLD TO SIMULATE</span></button>
+        <button class="mc-btn critical" id="btnChute">SIMULATE PARACHUTE STATE <span class="arm-icon">HOLD TO SIMULATE</span></button>
+        <button class="mc-btn critical" id="btnRedundant">SIMULATE REDUNDANT STATE <span class="arm-icon">HOLD TO SIMULATE</span></button>
       </div>
       <div class="mc-status-line" id="mcStatus">Awaiting command...</div>
     </div>
@@ -426,6 +427,7 @@ footer{
 
 <footer>WEGYANIK CANSAT GCS &nbsp;·&nbsp; FOR MISSION SIMULATION &amp; EDUCATIONAL USE &nbsp;·&nbsp; BUILD 2026.07</footer>
 
+<script src="./cansat_telemetry.js"></script>
 <script>
 /* =========================================================================
    STATE
@@ -778,14 +780,13 @@ async function readSerialLoop(port){
 // Expected CSV format from microcontroller:
 // alt,pressure,temp,descent,battery,lat,lng,gpsAlt,gpsFix(0/1),sats,sep(0/1),chute(0/1),roll,pitch,yaw
 function parseSerialLine(line){
-  const f = line.split(',').map(Number);
-  if(f.length < 15 || f.some(isNaN)) { pushLog('⚠ Malformed packet ignored: '+line); return; }
-  const p = {
-    altitude:f[0], pressure:f[1], temp:f[2], descent:f[3], battery:f[4],
-    lat:f[5], lng:f[6], gpsAlt:f[7], gpsAvailable: f[8]===1, sats:f[9],
-    separated: f[10]===1, chuteActive: f[11]===1, roll:f[12], pitch:f[13], yaw:f[14]
-  };
-  if(state.running) processPacket(p);
+  try {
+    if(!window.CANSATTelemetry) throw new Error('Telemetry validator is not loaded');
+    const packet = window.CANSATTelemetry.parseCSV(line);
+    if(state.running) processPacket(packet);
+  } catch(error) {
+    pushLog('⚠ Serial packet rejected: '+error.message);
+  }
 }
 
 /* =========================================================================
@@ -855,30 +856,53 @@ document.getElementById('btnExportGraph').addEventListener('click', ()=>{
    MISSION CONTROL — hold-to-arm critical commands
 ========================================================================= */
 function armAndFire(btn, label, action){
-  let holdTimer=null, armed=false;
-  const arm = ()=>{
-    armed=false;
+  let holdTimer = null;
+  let armed = false;
+  let pointerActive = false;
+
+  const clearArm = () => {
+    clearTimeout(holdTimer);
+    armed = false;
+    pointerActive = false;
+    btn.style.background = '';
+  };
+
+  const arm = (event) => {
+    if(state.source !== 'sim') {
+      clearArm();
+      pushLog('⚠ Simulation controls disabled while SERIAL is selected.');
+      document.getElementById('mcStatus').textContent = 'BLOCKED — SIMULATOR SOURCE REQUIRED';
+      return;
+    }
+    if(event && event.button !== undefined && event.button !== 0) return;
+    clearArm();
+    pointerActive = true;
     btn.style.background = 'rgba(255,77,94,0.18)';
-    holdTimer = setTimeout(()=>{
-      armed = true;
-      btn.style.background = 'rgba(255,77,94,0.35)';
+    holdTimer = setTimeout(() => {
+      if(pointerActive && state.source === 'sim') {
+        armed = true;
+        btn.style.background = 'rgba(255,77,94,0.35)';
+      }
     }, 900);
   };
-  const release = ()=>{
+
+  const release = () => {
     clearTimeout(holdTimer);
     btn.style.background = '';
-    if(armed){
+    if(pointerActive && armed && state.source === 'sim') {
       action();
-      document.getElementById('mcStatus').innerHTML = `<span style="color:var(--fault);">●</span> ${label} EXECUTED at ${new Date().toLocaleTimeString('en-GB',{hour12:false})}`;
-      pushLog(`🔴 COMMAND EXECUTED: ${label}`);
+      const timestamp = new Date().toLocaleTimeString('en-GB',{hour12:false});
+      document.getElementById('mcStatus').textContent = 'SIMULATED ONLY: '+label+' at '+timestamp;
+      pushLog('SIMULATED STATE CHANGE ONLY: '+label+' (no hardware command sent)');
     }
-    armed=false;
+    clearArm();
   };
-  btn.addEventListener('mousedown', arm);
-  btn.addEventListener('touchstart', arm);
-  btn.addEventListener('mouseup', release);
-  btn.addEventListener('mouseleave', ()=>{clearTimeout(holdTimer); btn.style.background='';});
-  btn.addEventListener('touchend', release);
+
+  btn.addEventListener('pointerdown', arm);
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointercancel', clearArm);
+  btn.addEventListener('pointerleave', clearArm);
+  window.addEventListener('blur', clearArm);
 }
 armAndFire(document.getElementById('btnSeparation'), 'MANUAL SEPARATION', ()=>{
   if(state.current) state.current.separated = true;
